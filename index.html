@@ -2,7 +2,7 @@
 <html lang="km">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ប្រព័ន្ធកត់ត្រាម៉ោងសម្រាក - BioBreak System</title>
     
     <!-- React & ReactDOM -->
@@ -23,7 +23,6 @@
     <style>
         body {
             font-family: "Kantumruy Pro", sans-serif;
-            -webkit-tap-highlight-color: transparent;
         }
         
         /* Custom Animations */
@@ -115,7 +114,7 @@
             animation: zoomIn 0.2s ease-out forwards;
         }
         
-        /* Selected Card Animation in Modal */
+        /* Selected Card Animation */
         .selected-card {
             border-color: #34d399 !important; /* Emerald 400 */
             box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.3) !important;
@@ -129,16 +128,6 @@
         }
         .clickable-card:active {
             transform: scale(0.98);
-        }
-        
-        /* Mobile Tab Styles */
-        .mobile-tab-active {
-            color: #34d399;
-            border-top: 2px solid #34d399;
-        }
-        .mobile-tab-inactive {
-            color: #94a3b8;
-            border-top: 2px solid transparent;
         }
     </style>
 </head>
@@ -242,7 +231,7 @@
             const [selectedIndex, setSelectedIndex] = useState(-1);
             
             // Mobile Specific State
-            const [mobileTab, setMobileTab] = useState('active'); // 'active' or 'history'
+            const [mobileTab, setMobileTab] = useState('active'); 
             
             // Notifications State
             const [notifications, setNotifications] = useState([]); 
@@ -251,6 +240,7 @@
             const searchRef = useRef(null);
             const lastLocalUpdate = useRef(0);
             const lastNotificationTime = useRef({}); 
+            const suggestionsListRef = useRef(null);
             
             const activeBreaksRef = useRef(activeBreaks);
             useEffect(() => { activeBreaksRef.current = activeBreaks; }, [activeBreaks]);
@@ -261,6 +251,17 @@
                     inputRef.current.focus();
                 }
             }, []);
+
+            // Scroll selected suggestion into view
+            useEffect(() => {
+                if (showSuggestions && suggestionsListRef.current && selectedIndex >= 0) {
+                    const list = suggestionsListRef.current;
+                    const selectedElement = list.children[selectedIndex + 1];
+                    if (selectedElement) {
+                        selectedElement.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                    }
+                }
+            }, [selectedIndex, showSuggestions]);
 
             // OVERTIME CHECKER (Every 1 second)
             useEffect(() => {
@@ -278,10 +279,6 @@
                         const LIMIT_MINUTES = 15;
 
                         if (durationMinutes > LIMIT_MINUTES) {
-                            // Check visibility (Top 6) on desktop or general list
-                            // On mobile, we might want alerts too, but let's stick to the logic provided:
-                            // If visible in top 6 (desktop), no toast. 
-                            // For mobile, all are visible in list, but let's keep logic consistent.
                             const isVisibleOnMainUI = index < 6;
 
                             if (!isVisibleOnMainUI) {
@@ -304,10 +301,13 @@
 
                     setNotifications(prev => {
                         const stillActive = prev.filter(n => now < n.expiresAt);
+                        
                         if (newAlerts.length === 0 && stillActive.length === prev.length) {
                             return prev;
                         }
+                        
                         if (newAlerts.length > 0) playNotificationSound();
+                        
                         return [...newAlerts, ...stillActive];
                     });
 
@@ -359,7 +359,7 @@
                 }
             }, []);
 
-            // Auto-Refresh
+            // Auto-Refresh Logic
             useEffect(() => {
                 if (!scriptUrl) return;
                 const interval = setInterval(() => {
@@ -542,21 +542,36 @@
                 return `${day}-${month}-${year}`;
             };
 
-            // --- SMART SUGGESTIONS LOGIC ---
+            // --- SMART SUGGESTIONS LOGIC (UPDATED) ---
             const suggestions = useMemo(() => {
-                const nameMap = new Map();
+                const uniqueNames = new Set(records.map(r => r.name));
+                // Add active names to the set if not already there (though usually active means they have history)
+                activeBreaks.forEach(b => uniqueNames.add(b.name));
 
-                allRecords.forEach(r => {
-                    const lowerName = r.name.toLowerCase();
-                    if (!nameMap.has(lowerName)) {
-                        nameMap.set(lowerName, {
-                            originalName: r.name,
+                // 1. Process allRecords to find unique names & latest info
+                const nameMap = new Map();
+                
+                // Helper to init map entry
+                const getEntry = (name) => {
+                    const lower = name.toLowerCase();
+                    if(!nameMap.has(lower)){
+                        nameMap.set(lower, {
+                            originalName: name,
                             countToday: 0,
                             durationToday: 0,
-                            lastTimestamp: 0
+                            lastTimestamp: 0,
+                            isActive: false, // Flag for active status
+                            breakId: null,   // Store ID if active
+                            startTime: null  // Store StartTime if active
                         });
                     }
-                    const entry = nameMap.get(lowerName);
+                    return nameMap.get(lower);
+                }
+
+                // Process History
+                allRecords.forEach(r => {
+                    const entry = getEntry(r.name);
+                    
                     const rTime = r.endTime ? r.endTime.getTime() : 0;
                     if (rTime > entry.lastTimestamp) {
                         entry.lastTimestamp = rTime;
@@ -572,24 +587,40 @@
                     }
                 });
 
-                const activeNames = activeBreaks.map(b => b.name.toLowerCase());
+                // Process Active Breaks (Override/Add)
+                activeBreaks.forEach(b => {
+                    const entry = getEntry(b.name);
+                    entry.isActive = true;
+                    entry.breakId = b.id;
+                    entry.startTime = b.startTime;
+                    // Ensure active names appear current
+                    entry.lastTimestamp = Date.now(); 
+                });
 
+                // Filter & Sort
                 const suggestionList = Array.from(nameMap.values()).map(entry => ({
                     name: entry.originalName,
                     count: entry.countToday,
                     totalDuration: entry.durationToday,
                     isToday: entry.countToday > 0,
+                    isActive: entry.isActive,
+                    breakId: entry.breakId,
+                    startTime: entry.startTime,
                     lastTimestamp: entry.lastTimestamp
                 }));
 
                 const filtered = suggestionList.filter(item => 
-                    !activeNames.includes(item.name.toLowerCase()) && 
                     item.name.toLowerCase().includes(nameInput.toLowerCase())
                 );
 
                 return filtered.sort((a, b) => {
+                    // Active users first
+                    if (a.isActive && !b.isActive) return -1;
+                    if (!a.isActive && b.isActive) return 1;
+                    // Then by activity today
                     if (a.isToday && !b.isToday) return -1;
                     if (!a.isToday && b.isToday) return 1;
+                    // Then by recency
                     return b.lastTimestamp - a.lastTimestamp; 
                 });
 
@@ -607,8 +638,23 @@
                 } else if (e.key === 'Enter') {
                     if (selectedIndex >= 0) {
                         e.preventDefault();
-                        selectSuggestion(suggestions[selectedIndex].name);
+                        selectSuggestion(suggestions[selectedIndex]);
                     }
+                }
+            };
+
+            const selectSuggestion = (suggestion) => {
+                if (suggestion.isActive) {
+                    // If active, end break
+                    const breakItem = activeBreaks.find(b => b.id === suggestion.breakId);
+                    if (breakItem) {
+                        handleEndBreak(breakItem);
+                        setNameInput('');
+                        setShowSuggestions(false);
+                    }
+                } else {
+                    // Else start break
+                    handleStartBreak(null, suggestion.name);
                 }
             };
 
@@ -620,8 +666,17 @@
                 if (!scriptUrl) { alert("សូមបញ្ចូល Google Script URL ជាមុនសិន!"); setShowSettings(true); return; }
 
                 if (activeBreaks.some(b => b.name.toLowerCase() === name.toLowerCase())) {
-                    alert(`ឈ្មោះ "${name}" កំពុងសម្រាករួចហើយ!`);
-                    return;
+                    // This case handles direct typing of an active name without using dropdown
+                    // Ideally we should redirect to end break, but without the ID we can't easily.
+                    // The dropdown is the primary way to handle this smart logic.
+                    // Fallback: Find the active break and end it.
+                    const existingBreak = activeBreaks.find(b => b.name.toLowerCase() === name.toLowerCase());
+                    if (existingBreak) {
+                        handleEndBreak(existingBreak);
+                        setNameInput('');
+                        setShowSuggestions(false);
+                        return;
+                    }
                 }
 
                 // 1. UPDATE LOCAL STATE IMMEDIATELY (OPTIMISTIC UI)
@@ -646,10 +701,6 @@
                     startTime: formatTime(now),
                     action: 'start' 
                 });
-            };
-
-            const selectSuggestion = (name) => {
-                handleStartBreak(null, name);
             };
 
             const handleEndBreak = (breakItem) => {
@@ -852,119 +903,129 @@
                         </div>
                     )}
 
-                    {/* DESKTOP UI (Hidden on mobile) */}
-                    <div className="hidden md:flex flex-col min-h-screen">
-                        {/* Top Navbar */}
-                        <nav className="sticky top-0 z-50 glass-panel border-b border-emerald-500/10">
-                            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                    <div className="bg-emerald-500/20 p-2 rounded-lg text-emerald-400 border border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.3)]">
-                                        <Zap size={20} />
-                                    </div>
-                                    <div>
-                                        <h1 className="text-xl font-bold text-white tracking-wider neon-text hidden sm:block">
-                                            BIO<span className="text-emerald-400">BREAK</span> SHEETS
-                                        </h1>
-                                        <h1 className="text-lg font-bold text-white tracking-wider neon-text sm:hidden">
-                                            BIO<span className="text-emerald-400">BREAK</span>
-                                        </h1>
-                                    </div>
+                    {/* Top Navbar */}
+                    <nav className="sticky top-0 z-50 glass-panel border-b border-emerald-500/10">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-emerald-500/20 p-2 rounded-lg text-emerald-400 border border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+                                    <Zap size={20} />
                                 </div>
-                                <div className="flex items-center gap-4">
-                                    {/* Sync Status Indicator */}
-                                    <button onClick={handleRefresh} title="ចុចដើម្បី Refresh ទិន្នន័យ" className={`flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/5 transition active:scale-95 ${syncStatus === 'success' || syncStatus === 'idle' ? 'bg-emerald-900/20' : 'bg-rose-900/20'}`}>
-                                        {syncStatus === 'syncing' && <div className="spinner"></div>}
-                                        {(syncStatus === 'success' || syncStatus === 'idle') && <SheetIcon size={16} className="text-emerald-400" />}
-                                        {syncStatus === 'error' && <CloudOff size={16} className="text-rose-500" />}
-                                        
-                                        <span className="text-xs font-medium text-slate-300 hidden sm:inline">
-                                            {syncStatus === 'syncing' ? 'Syncing...' : 
-                                            syncStatus === 'error' ? 'Error' : 'Auto Sync'}
-                                        </span>
-                                    </button>
-
-                                    <button onClick={() => setShowSettings(true)} className="p-2 text-slate-400 hover:text-white transition hover:bg-white/10 rounded-lg">
-                                        <Settings size={20} />
-                                    </button>
-                                    
-                                    <div className="hidden md:flex flex-col items-end border-l border-emerald-500/20 pl-4">
-                                        <span className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest">
-                                            {currentTime.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                                        </span>
-                                        <span className="text-lg font-bold font-mono text-white leading-none tracking-widest">
-                                            {currentTime.toLocaleTimeString('en-US', { hour12: false })}
-                                        </span>
-                                    </div>
+                                <div>
+                                    <h1 className="text-xl font-bold text-white tracking-wider neon-text hidden sm:block">
+                                        BIO<span className="text-emerald-400">BREAK</span> SHEETS
+                                    </h1>
+                                    <h1 className="text-lg font-bold text-white tracking-wider neon-text sm:hidden">
+                                        BIO<span className="text-emerald-400">BREAK</span>
+                                    </h1>
                                 </div>
                             </div>
-                        </nav>
+                            <div className="flex items-center gap-4">
+                                {/* Sync Status Indicator */}
+                                <button onClick={handleRefresh} title="ចុចដើម្បី Refresh ទិន្នន័យ" className={`flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/5 transition active:scale-95 ${syncStatus === 'success' || syncStatus === 'idle' ? 'bg-emerald-900/20' : 'bg-rose-900/20'}`}>
+                                    {syncStatus === 'syncing' && <div className="spinner"></div>}
+                                    {(syncStatus === 'success' || syncStatus === 'idle') && <SheetIcon size={16} className="text-emerald-400" />}
+                                    {syncStatus === 'error' && <CloudOff size={16} className="text-rose-500" />}
+                                    
+                                    <span className="text-xs font-medium text-slate-300 hidden sm:inline">
+                                        {syncStatus === 'syncing' ? 'Syncing...' : 
+                                         syncStatus === 'error' ? 'Error' : 'Auto Sync'}
+                                    </span>
+                                </button>
 
-                        <main className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 flex-1 w-full">
-                            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                            
-                            {/* Left Panel: Input & Active List */}
-                            <div className="lg:col-span-8 space-y-8">
+                                <button onClick={() => setShowSettings(true)} className="p-2 text-slate-400 hover:text-white transition hover:bg-white/10 rounded-lg">
+                                    <Settings size={20} />
+                                </button>
                                 
-                                {/* Quick Input Card - Added z-30 for stacking fix */}
-                                <div className="glass-panel rounded-3xl p-1 relative overflow-visible group z-30">
-                                    <div className="absolute top-0 right-0 -mr-20 -mt-20 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                                <div className="hidden md:flex flex-col items-end border-l border-emerald-500/20 pl-4">
+                                    <span className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest">
+                                        {currentTime.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                                    </span>
+                                    <span className="text-lg font-bold font-mono text-white leading-none tracking-widest">
+                                        {currentTime.toLocaleTimeString('en-US', { hour12: false })}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </nav>
 
-                                    <div className="p-6 md:p-8 relative z-10">
-                                        <div className="flex items-center justify-between mb-6">
-                                            <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-                                                <Coffee className="text-emerald-400" size={32} />
-                                                <span>ចាប់ផ្តើមសម្រាក</span>
-                                            </h2>
-                                            <div className="bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide border border-emerald-500/20">
-                                                New Entry
-                                            </div>
+                    <main className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                        
+                        {/* Left Panel: Input & Active List */}
+                        <div className="lg:col-span-8 space-y-8">
+                            
+                            {/* Quick Input Card - Added z-30 for stacking fix */}
+                            <div className="glass-panel rounded-3xl p-1 relative overflow-visible group z-30">
+                                <div className="absolute top-0 right-0 -mr-20 -mt-20 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+                                <div className="p-6 md:p-8 relative z-10">
+                                    <div className="flex items-center justify-between mb-6">
+                                        <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                                            <Coffee className="text-emerald-400" size={32} />
+                                            <span>ចាប់ផ្តើមសម្រាក</span>
+                                        </h2>
+                                        <div className="bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide border border-emerald-500/20">
+                                            New Entry
                                         </div>
+                                    </div>
 
-                                        <form onSubmit={handleStartBreak} className="relative group" onClick={(e) => e.stopPropagation()}>
-                                            <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                                                <User className="text-emerald-500/50 group-focus-within:text-emerald-400 transition-colors" size={24} />
-                                            </div>
-                                            <input
-                                                ref={inputRef}
-                                                type="text"
-                                                value={nameInput}
-                                                onFocus={() => setShowSuggestions(true)}
-                                                onKeyDown={handleInputKeyDown}
-                                                onChange={(e) => {
-                                                    setNameInput(e.target.value);
-                                                    setShowSuggestions(true);
-                                                }}
-                                                placeholder="បញ្ចូលឈ្មោះបុគ្គលិក..."
-                                                className="w-full pl-14 pr-32 py-5 rounded-2xl glass-input text-lg font-medium text-white placeholder:text-slate-500 focus:bg-black/40 focus:border-emerald-500/50 focus:ring-4 focus:ring-emerald-500/10 outline-none transition-all duration-300"
-                                                autoComplete="off"
-                                            />
-                                            <button 
-                                                type="submit" 
-                                                className="absolute right-2 top-2 bottom-2 bg-emerald-600 hover:bg-emerald-500 text-white px-6 rounded-xl font-bold shadow-[0_0_20px_rgba(16,185,129,0.2)] hover:shadow-[0_0_25px_rgba(16,185,129,0.4)] transform active:scale-95 transition-all duration-200 flex items-center gap-2 border border-emerald-400/20"
+                                    <form onSubmit={handleStartBreak} className="relative group" onClick={(e) => e.stopPropagation()}>
+                                        <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+                                            <User className="text-emerald-500/50 group-focus-within:text-emerald-400 transition-colors" size={24} />
+                                        </div>
+                                        <input
+                                            ref={inputRef}
+                                            type="text"
+                                            value={nameInput}
+                                            onFocus={() => setShowSuggestions(true)}
+                                            onKeyDown={handleInputKeyDown}
+                                            onChange={(e) => {
+                                                setNameInput(e.target.value);
+                                                setShowSuggestions(true);
+                                            }}
+                                            placeholder="បញ្ចូលឈ្មោះបុគ្គលិក..."
+                                            className="w-full pl-14 pr-32 py-5 rounded-2xl glass-input text-lg font-medium text-white placeholder:text-slate-500 focus:bg-black/40 focus:border-emerald-500/50 focus:ring-4 focus:ring-emerald-500/10 outline-none transition-all duration-300"
+                                            autoComplete="off"
+                                        />
+                                        <button 
+                                            type="submit" 
+                                            className="absolute right-2 top-2 bottom-2 bg-emerald-600 hover:bg-emerald-500 text-white px-6 rounded-xl font-bold shadow-[0_0_20px_rgba(16,185,129,0.2)] hover:shadow-[0_0_25px_rgba(16,185,129,0.4)] transform active:scale-95 transition-all duration-200 flex items-center gap-2 border border-emerald-400/20"
+                                        >
+                                            <Plus size={20} />
+                                            <span className="hidden sm:inline">Add</span>
+                                        </button>
+
+                                        {/* Smart Suggestions Dropdown - Positioned ABOVE cards (z-50) */}
+                                        {showSuggestions && suggestions.length > 0 && (
+                                            <div 
+                                                ref={suggestionsListRef}
+                                                className="absolute top-full left-0 right-0 mt-2 bg-[#0a201a] border border-emerald-500/30 rounded-2xl shadow-2xl overflow-hidden z-50 animate-slide-in max-h-60 overflow-y-auto custom-scrollbar"
                                             >
-                                                <Plus size={20} />
-                                                <span className="hidden sm:inline">Add</span>
-                                            </button>
-
-                                            {/* Smart Suggestions Dropdown - Positioned ABOVE cards (z-50) */}
-                                            {showSuggestions && suggestions.length > 0 && (
-                                                <div className="absolute top-full left-0 right-0 mt-2 bg-[#0a201a] border border-emerald-500/30 rounded-2xl shadow-2xl overflow-hidden z-50 animate-slide-in max-h-60 overflow-y-auto custom-scrollbar">
-                                                    <div className="px-4 py-2 text-xs font-bold text-slate-500 uppercase tracking-wider bg-black/20 border-b border-white/5">
-                                                        ជ្រើសរើសឈ្មោះ (បានកត់ត្រាថ្ងៃនេះ: {suggestions.filter(s => s.isToday).length})
-                                                    </div>
-                                                    {suggestions.map((suggestion, index) => (
+                                                <div className="px-4 py-2 text-xs font-bold text-slate-500 uppercase tracking-wider bg-black/20 border-b border-white/5">
+                                                    ជ្រើសរើសឈ្មោះ (បានកត់ត្រាថ្ងៃនេះ: {suggestions.filter(s => s.isToday).length})
+                                                </div>
+                                                {suggestions.map((suggestion, index) => {
+                                                    const liveDuration = suggestion.isActive ? calculateLiveDurationInfo(suggestion.startTime) : null;
+                                                    
+                                                    return (
                                                         <div 
                                                             key={index}
-                                                            onClick={() => selectSuggestion(suggestion.name)}
-                                                            className={`px-4 py-3 cursor-pointer flex items-center justify-between group transition-colors border-b border-white/5 last:border-0 ${index === selectedIndex ? 'bg-emerald-500/30' : 'hover:bg-emerald-500/20'}`}
+                                                            onMouseEnter={() => setSelectedIndex(index)}
+                                                            onClick={() => selectSuggestion(suggestion)}
+                                                            className={`px-4 py-3 cursor-pointer flex items-center justify-between group transition-colors border-b border-white/5 last:border-0 ${index === selectedIndex ? 'bg-emerald-500/30' : 'hover:bg-emerald-500/20'} ${suggestion.isActive ? 'bg-orange-500/20 border-l-4 border-l-orange-500' : ''}`}
                                                         >
                                                             <div className="flex items-center gap-3">
-                                                                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${suggestion.isToday ? 'bg-emerald-500 text-black' : 'bg-slate-700 text-slate-300'}`}>
+                                                                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${suggestion.isActive ? 'bg-orange-500 text-black' : (suggestion.isToday ? 'bg-emerald-500 text-black' : 'bg-slate-700 text-slate-300')}`}>
                                                                     {suggestion.name.charAt(0).toUpperCase()}
                                                                 </div>
                                                                 <div>
-                                                                    <div className="font-bold text-slate-200 group-hover:text-white">{suggestion.name}</div>
-                                                                    {suggestion.isToday && (
+                                                                    <div className={`font-bold group-hover:text-white ${suggestion.isActive ? 'text-orange-300' : 'text-slate-200'}`}>{suggestion.name}</div>
+                                                                    {suggestion.isActive ? (
+                                                                        <div className="text-[10px] text-orange-300 flex items-center gap-2 mt-0.5">
+                                                                            <span className="flex items-center gap-1"><Clock size={10} /> {formatTime(suggestion.startTime)}</span>
+                                                                            <span className="flex items-center gap-1"><Timer size={10} /> {liveDuration.text}</span>
+                                                                        </div>
+                                                                    ) : suggestion.isToday && (
                                                                         <div className="text-[10px] text-emerald-400 flex items-center gap-1">
                                                                             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
                                                                             ធ្លាប់សម្រាកថ្ងៃនេះ
@@ -973,178 +1034,184 @@
                                                                 </div>
                                                             </div>
                                                             
-                                                            {suggestion.isToday && (
-                                                                <div className="text-right">
-                                                                    <div className="text-xs font-bold text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                                                                        {suggestion.count} ដង
-                                                                    </div>
-                                                                    <div className="text-[10px] text-slate-400 mt-0.5">
-                                                                        សរុប: {formatTotalMinutes(suggestion.totalDuration)}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </form>
-                                    </div>
-                                </div>
-
-                                {/* Active Breaks Section - Main UI (Limited to 6) */}
-                                <div>
-                                    <div className="flex items-center justify-between mb-6 px-2">
-                                        <h3 className="text-lg font-bold text-emerald-100 flex items-center gap-2">
-                                            <Timer size={20} className="text-emerald-400" />
-                                            កំពុងសម្រាក (Live)
-                                            <span className="bg-emerald-500/20 text-emerald-300 text-xs py-0.5 px-2 rounded-full ml-1 font-extrabold border border-emerald-500/20">
-                                                {activeBreaks.length}
-                                            </span>
-                                        </h3>
-                                        <div className="flex items-center gap-2">
-                                            {activeBreaks.length > 6 && (
-                                                <button 
-                                                    onClick={() => setShowFullActiveList(true)}
-                                                    className="text-xs font-bold bg-white/10 hover:bg-white/20 text-emerald-300 px-3 py-1 rounded-lg transition"
-                                                >
-                                                    បង្ហាញទាំងអស់ (Alt+1)
-                                                </button>
-                                            )}
-                                            {syncStatus === 'syncing' && <span className="text-xs text-emerald-500/70 animate-pulse">Updating...</span>}
-                                        </div>
-                                    </div>
-                                    
-                                    {activeBreaks.length === 0 ? (
-                                        <div className="glass-panel border-dashed border-emerald-500/20 rounded-3xl p-12 flex flex-col items-center justify-center text-center">
-                                            <div className="bg-emerald-500/5 p-4 rounded-full mb-4 border border-emerald-500/10">
-                                                <Coffee size={40} className="text-emerald-500/30" />
-                                            </div>
-                                            <p className="text-emerald-100/50 font-medium text-lg">មិនមានបុគ្គលិកកំពុងសម្រាកទេ</p>
-                                            <p className="text-emerald-500/30 text-sm mt-1">ទិន្នន័យពី Google Sheet នឹងបង្ហាញទីនេះ</p>
-                                        </div>
-                                    ) : (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {activeBreaks.slice(0, 6).map((item) => {
-                                                const durationInfo = calculateLiveDurationInfo(item.startTime);
-                                                const isOvertime = durationInfo.minutes > 15;
-                                                
-                                                return (
-                                                    <div 
-                                                        key={item.id} 
-                                                        onClick={() => handleEndBreak(item)}
-                                                        className={`glass-panel p-5 rounded-2xl hover:bg-emerald-900/20 hover:border-emerald-400 transition-all duration-300 animate-slide-in relative overflow-hidden group border-l-4 border-l-emerald-500 clickable-card ${isOvertime ? 'overtime-alert' : ''}`}
-                                                    >
-                                                        <div className="flex justify-between items-start">
-                                                            <div className="pl-2">
-                                                                <h4 className="font-bold text-xl text-white mb-1">{item.name}</h4>
-                                                                <div className="flex items-center gap-2 text-emerald-400/70 text-sm mb-4">
-                                                                    <Clock size={14} className="text-emerald-500"/>
-                                                                    <span>ចាប់ផ្តើម: {formatTime(item.startTime)}</span>
-                                                                </div>
-                                                                
-                                                                <div className={`px-3 py-1.5 rounded-lg inline-flex items-center gap-2 font-mono font-bold text-lg border shadow-inner ${isOvertime ? 'bg-red-900/40 text-red-400 border-red-500/50' : 'bg-black/30 text-emerald-400 border-emerald-500/20'}`}>
-                                                                    <span className={`relative flex h-2 w-2 ${isOvertime ? 'hidden' : ''}`}>
-                                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                                            <div className="text-right">
+                                                                {suggestion.isActive ? (
+                                                                    <span className="text-xs font-bold text-orange-400 bg-orange-500/20 px-2 py-1 rounded border border-orange-500/30 flex items-center gap-1">
+                                                                        <LogIn size={10} /> ចូលវិញ
                                                                     </span>
-                                                                    {durationInfo.text}
-                                                                </div>
-                                                                
-                                                                {isOvertime && (
-                                                                    <div className="text-xs font-bold text-red-500 mt-2 animate-pulse flex items-center gap-1">
-                                                                        <AlertTriangle size={12} />
-                                                                        លើស {durationInfo.minutes - 15} នាទី
+                                                                ) : suggestion.isToday && (
+                                                                    <div className="text-right">
+                                                                        <div className="text-xs font-bold text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                                                                            {suggestion.count} ដង
+                                                                        </div>
+                                                                        <div className="text-[10px] text-slate-400 mt-0.5">
+                                                                            សរុប: {formatTotalMinutes(suggestion.totalDuration)}
+                                                                        </div>
                                                                     </div>
                                                                 )}
                                                             </div>
-
-                                                            <button
-                                                                className="bg-emerald-500/10 text-emerald-300 p-4 rounded-2xl hover:bg-emerald-500 hover:text-white hover:shadow-[0_0_20px_rgba(16,185,129,0.4)] transition-all duration-300 group-hover:scale-105 active:scale-95 flex flex-col items-center gap-1 border border-emerald-500/20"
-                                                                title="ត្រឡប់ចូលធ្វើការ"
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation(); // Keep button separate if needed logic later, but div click handles it too
-                                                                    handleEndBreak(item);
-                                                                }}
-                                                            >
-                                                                <LogIn size={24} />
-                                                                <span className="text-[10px] font-bold uppercase tracking-wide">ចូលវិញ</span>
-                                                            </button>
                                                         </div>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </form>
                                 </div>
                             </div>
 
-                            {/* Right Panel: History */}
-                            <div className="lg:col-span-4">
-                                <div className="glass-panel rounded-3xl flex flex-col h-[calc(100vh-8rem)] sticky top-24 overflow-hidden">
-                                    <div className="p-6 border-b border-emerald-500/10 bg-black/20 flex justify-between items-center">
-                                        <h3 className="font-bold text-lg text-emerald-100 flex items-center gap-2">
-                                            <History className="text-emerald-400" size={20} />
-                                            <span>ប្រវត្តិថ្ងៃនេះ</span>
-                                        </h3>
-                                        {records.length > 0 && (
-                                            <div className="text-xs text-slate-500">Sync with Sheet</div>
+                            {/* Active Breaks Section - Main UI (Limited to 6) */}
+                            <div>
+                                <div className="flex items-center justify-between mb-6 px-2">
+                                    <h3 className="text-lg font-bold text-emerald-100 flex items-center gap-2">
+                                        <Timer size={20} className="text-emerald-400" />
+                                        កំពុងសម្រាក (Live)
+                                        <span className="bg-emerald-500/20 text-emerald-300 text-xs py-0.5 px-2 rounded-full ml-1 font-extrabold border border-emerald-500/20">
+                                            {activeBreaks.length}
+                                        </span>
+                                    </h3>
+                                    <div className="flex items-center gap-2">
+                                        {activeBreaks.length > 6 && (
+                                            <button 
+                                                onClick={() => setShowFullActiveList(true)}
+                                                className="text-xs font-bold bg-white/10 hover:bg-white/20 text-emerald-300 px-3 py-1 rounded-lg transition"
+                                            >
+                                                បង្ហាញទាំងអស់ (Alt+1)
+                                            </button>
                                         )}
+                                        {syncStatus === 'syncing' && <span className="text-xs text-emerald-500/70 animate-pulse">Updating...</span>}
                                     </div>
-                                    
-                                    <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
-                                        {records.length === 0 ? (
-                                            <div className="h-full flex flex-col items-center justify-center text-emerald-500/20 space-y-3">
-                                                <Calendar size={48} strokeWidth={1} />
-                                                <p className="text-sm font-mono">NO_DATA_AVAILABLE</p>
-                                            </div>
-                                        ) : (
-                                            records.map((record) => (
+                                </div>
+                                
+                                {activeBreaks.length === 0 ? (
+                                    <div className="glass-panel border-dashed border-emerald-500/20 rounded-3xl p-12 flex flex-col items-center justify-center text-center">
+                                        <div className="bg-emerald-500/5 p-4 rounded-full mb-4 border border-emerald-500/10">
+                                            <Coffee size={40} className="text-emerald-500/30" />
+                                        </div>
+                                        <p className="text-emerald-100/50 font-medium text-lg">មិនមានបុគ្គលិកកំពុងសម្រាកទេ</p>
+                                        <p className="text-emerald-500/30 text-sm mt-1">ទិន្នន័យពី Google Sheet នឹងបង្ហាញទីនេះ</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {activeBreaks.slice(0, 6).map((item) => {
+                                            const durationInfo = calculateLiveDurationInfo(item.startTime);
+                                            const isOvertime = durationInfo.minutes > 15;
+                                            
+                                            return (
                                                 <div 
-                                                    key={record.id} 
-                                                    className="bg-black/20 border border-emerald-500/10 p-4 rounded-2xl hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all duration-200 animate-slide-in group relative"
+                                                    key={item.id} 
+                                                    onClick={() => handleEndBreak(item)}
+                                                    className={`glass-panel p-5 rounded-2xl hover:bg-emerald-900/20 hover:border-emerald-400 transition-all duration-300 animate-slide-in relative overflow-hidden group border-l-4 border-l-emerald-500 clickable-card ${isOvertime ? 'overtime-alert' : ''}`}
                                                 >
-                                                    <button 
-                                                        onClick={() => handleDeleteRecord(record.id)}
-                                                        className="absolute top-2 right-2 text-slate-600 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                    >
-                                                        <Trash2 size={14} />
-                                                    </button>
+                                                    <div className="flex justify-between items-start">
+                                                        <div className="pl-2">
+                                                            <h4 className="font-bold text-xl text-white mb-1">{item.name}</h4>
+                                                            <div className="flex items-center gap-2 text-emerald-400/70 text-sm mb-4">
+                                                                <Clock size={14} className="text-emerald-500"/>
+                                                                <span>ចាប់ផ្តើម: {formatTime(item.startTime)}</span>
+                                                            </div>
+                                                            
+                                                            <div className={`px-3 py-1.5 rounded-lg inline-flex items-center gap-2 font-mono font-bold text-lg border shadow-inner ${isOvertime ? 'bg-red-900/40 text-red-400 border-red-500/50' : 'bg-black/30 text-emerald-400 border-emerald-500/20'}`}>
+                                                                <span className={`relative flex h-2 w-2 ${isOvertime ? 'hidden' : ''}`}>
+                                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                                                </span>
+                                                                {durationInfo.text}
+                                                            </div>
+                                                            
+                                                            {isOvertime && (
+                                                                <div className="text-xs font-bold text-red-500 mt-2 animate-pulse flex items-center gap-1">
+                                                                    <AlertTriangle size={12} />
+                                                                    លើស {durationInfo.minutes - 15} នាទី
+                                                                </div>
+                                                            )}
+                                                        </div>
 
-                                                    <div className="flex justify-between items-start mb-2 pr-4">
-                                                        <span className="font-bold text-slate-200 text-lg group-hover:text-emerald-400 transition-colors">
-                                                            {record.name}
-                                                        </span>
-                                                        <span className="bg-emerald-500/10 text-emerald-400 text-xs font-bold px-2 py-1 rounded-lg border border-emerald-500/10">
-                                                            {formatTotalMinutes(record.durationMinutes || record.duration)}
-                                                        </span>
-                                                    </div>
-                                                    
-                                                    <div className="grid grid-cols-2 gap-2 text-xs text-slate-400 mt-3">
-                                                        <div className="bg-black/30 p-2 rounded-lg flex items-center gap-2 border border-white/5">
-                                                            <LogOut size={12} className="text-orange-400" />
-                                                            {formatTime(record.startTime)}
-                                                        </div>
-                                                        <div className="bg-emerald-900/20 p-2 rounded-lg flex items-center gap-2 text-emerald-300 border border-emerald-500/10">
-                                                            <LogIn size={12} className="text-emerald-400" />
-                                                            {formatTime(record.endTime)}
-                                                        </div>
+                                                        <button
+                                                            className="bg-emerald-500/10 text-emerald-300 p-4 rounded-2xl hover:bg-emerald-500 hover:text-white hover:shadow-[0_0_20px_rgba(16,185,129,0.4)] transition-all duration-300 group-hover:scale-105 active:scale-95 flex flex-col items-center gap-1 border border-emerald-500/20"
+                                                            title="ត្រឡប់ចូលធ្វើការ"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation(); // Keep button separate if needed logic later, but div click handles it too
+                                                                handleEndBreak(item);
+                                                            }}
+                                                        >
+                                                            <LogIn size={24} />
+                                                            <span className="text-[10px] font-bold uppercase tracking-wide">ចូលវិញ</span>
+                                                        </button>
                                                     </div>
                                                 </div>
-                                            ))
-                                        )}
+                                            );
+                                        })}
                                     </div>
-                                    
-                                    <div className="p-4 bg-black/20 border-t border-emerald-500/10 text-center">
-                                        <p className="text-xs font-medium text-emerald-500/50 uppercase tracking-widest font-mono">
-                                            Total Records: {records.length}
-                                        </p>
-                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Right Panel: History */}
+                        <div className="lg:col-span-4">
+                            <div className="glass-panel rounded-3xl flex flex-col h-[calc(100vh-8rem)] sticky top-24 overflow-hidden">
+                                <div className="p-6 border-b border-emerald-500/10 bg-black/20 flex justify-between items-center">
+                                    <h3 className="font-bold text-lg text-emerald-100 flex items-center gap-2">
+                                        <History className="text-emerald-400" size={20} />
+                                        <span>ប្រវត្តិថ្ងៃនេះ</span>
+                                    </h3>
+                                    {records.length > 0 && (
+                                        <div className="text-xs text-slate-500">Sync with Sheet</div>
+                                    )}
+                                </div>
+                                
+                                <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                                    {records.length === 0 ? (
+                                        <div className="h-full flex flex-col items-center justify-center text-emerald-500/20 space-y-3">
+                                            <Calendar size={48} strokeWidth={1} />
+                                            <p className="text-sm font-mono">NO_DATA_AVAILABLE</p>
+                                        </div>
+                                    ) : (
+                                        records.map((record) => (
+                                            <div 
+                                                key={record.id} 
+                                                className="bg-black/20 border border-emerald-500/10 p-4 rounded-2xl hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all duration-200 animate-slide-in group relative"
+                                            >
+                                                <button 
+                                                    onClick={() => handleDeleteRecord(record.id)}
+                                                    className="absolute top-2 right-2 text-slate-600 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+
+                                                <div className="flex justify-between items-start mb-2 pr-4">
+                                                    <span className="font-bold text-slate-200 text-lg group-hover:text-emerald-400 transition-colors">
+                                                        {record.name}
+                                                    </span>
+                                                    <span className="bg-emerald-500/10 text-emerald-400 text-xs font-bold px-2 py-1 rounded-lg border border-emerald-500/10">
+                                                        {formatTotalMinutes(record.durationMinutes || record.duration)}
+                                                    </span>
+                                                </div>
+                                                
+                                                <div className="grid grid-cols-2 gap-2 text-xs text-slate-400 mt-3">
+                                                    <div className="bg-black/30 p-2 rounded-lg flex items-center gap-2 border border-white/5">
+                                                        <LogOut size={12} className="text-orange-400" />
+                                                        {formatTime(record.startTime)}
+                                                    </div>
+                                                    <div className="bg-emerald-900/20 p-2 rounded-lg flex items-center gap-2 text-emerald-300 border border-emerald-500/10">
+                                                        <LogIn size={12} className="text-emerald-400" />
+                                                        {formatTime(record.endTime)}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                                
+                                <div className="p-4 bg-black/20 border-t border-emerald-500/10 text-center">
+                                    <p className="text-xs font-medium text-emerald-500/50 uppercase tracking-widest font-mono">
+                                        Total Records: {records.length}
+                                    </p>
                                 </div>
                             </div>
+                        </div>
 
-                            </div>
-                        </main>
-                    </div>
+                        </div>
+                    </main>
 
                     {/* MOBILE UI (Hidden on desktop) */}
                     <div className="md:hidden flex flex-col h-screen overflow-hidden">
@@ -1204,13 +1271,24 @@
                                                             <div 
                                                                 key={index}
                                                                 onClick={() => {
-                                                                    selectSuggestion(suggestion.name);
+                                                                    selectSuggestion(suggestion);
                                                                     setShowSuggestions(false);
                                                                 }}
-                                                                className="px-4 py-3 border-b border-white/5 last:border-0 flex items-center justify-between active:bg-emerald-500/20"
+                                                                className={`px-4 py-3 border-b border-white/5 last:border-0 flex items-center justify-between active:bg-emerald-500/20 ${suggestion.isActive ? 'bg-orange-500/10' : ''}`}
                                                             >
-                                                                <span className="text-white font-medium">{suggestion.name}</span>
-                                                                {suggestion.isToday && <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">{suggestion.count}ដង</span>}
+                                                                <div>
+                                                                    <span className={`font-medium ${suggestion.isActive ? 'text-orange-300' : 'text-white'}`}>{suggestion.name}</span>
+                                                                    {suggestion.isActive && 
+                                                                        <div className="text-[10px] text-orange-400/70 mt-0.5 flex items-center gap-1">
+                                                                            <Clock size={10} /> {formatTime(suggestion.startTime)}
+                                                                        </div>
+                                                                    }
+                                                                </div>
+                                                                {suggestion.isActive ? (
+                                                                    <span className="text-xs font-bold text-orange-400 bg-orange-500/20 px-1.5 py-0.5 rounded border border-orange-500/30">ចូលវិញ</span>
+                                                                ) : (
+                                                                    suggestion.isToday && <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">{suggestion.count}ដង</span>
+                                                                )}
                                                             </div>
                                                         ))}
                                                     </div>
